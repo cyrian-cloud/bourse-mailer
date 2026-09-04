@@ -1,0 +1,30 @@
+name: Patrimoine Auto-Update
+
+on:
+  schedule:
+    - cron: '0 7 * * 1'
+    - cron: '0 7 8 * *'
+  workflow_dispatch:
+
+jobs:
+  update-patrimoine:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install yfinance gspread google-auth requests
+
+      - name: Update Google Sheet Patrimoine
+        env:
+          GSHEET_PATRIMOINE_ID: ${{ secrets.GSHEET_PATRIMOINE_ID }}
+          GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
+        run: python update_patrimoine.py
+        timeout-minutes: 5
