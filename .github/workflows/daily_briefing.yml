@@ -19,7 +19,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install yfinance requests
+          pip install yfinance requests schedule
 
       - name: Run briefing
         env:
