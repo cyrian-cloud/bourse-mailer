@@ -572,10 +572,11 @@ class WatchlistWidget:
                     del pf[ticker]["pending"]
                 save_portfolio(pf)
                 # Auto-push GitHub pour sync avec GitHub Actions
-                threading.Thread(
+                push_thread = threading.Thread(
                     target=git_push_portfolio,
                     args=(f"achat {q}x {ticker} a ${p}",),
-                    daemon=True).start()
+                    daemon=False)
+                push_thread.start()
                 remove_strategy(ticker)
                 if ticker in self.watchlist:
                     del self.watchlist[ticker]
@@ -650,10 +651,11 @@ class WatchlistWidget:
                     pf[ticker]["qty"] = remaining
                 save_portfolio(pf)
                 # Auto-push GitHub pour sync avec GitHub Actions
-                threading.Thread(
+                push_thread = threading.Thread(
                     target=git_push_portfolio,
                     args=(f"vente {q}x {ticker} a ${p}",),
-                    daemon=True).start()
+                    daemon=False)
+                push_thread.start()
                 # Si tous les titres vendus, supprime la strategie
                 if remaining <= 0:
                     remove_strategy(ticker)
