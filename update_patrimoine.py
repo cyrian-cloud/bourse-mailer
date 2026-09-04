@@ -22,9 +22,7 @@ USD_TICKERS = {"NBIS","ASTS","GOOGL","AMZN","NVDA","TSLA","MSFT","AAPL","META","
 
 # Mapping ticker portefeuille → ticker yfinance
 YF_TICKER_MAP = {
-    "STMPA.PA": "STM.PA",
-    "2NN.HA":   "NN.AS",
-    "UST.PA":   "ISTA.PA",
+    "2NN.HA": "NN.AS",
 }
 
 # Bricks
