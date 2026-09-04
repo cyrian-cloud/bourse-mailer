@@ -84,11 +84,13 @@ def git_push_portfolio(message=""):
                        check=True, capture_output=True)
         subprocess.run(["git", "-C", repo_dir, "commit", "-m", commit_msg],
                        check=True, capture_output=True)
+        # Pull --rebase avant push pour eviter les conflits
+        subprocess.run(["git", "-C", repo_dir, "pull", "--rebase"],
+                       check=True, capture_output=True)
         subprocess.run(["git", "-C", repo_dir, "push"],
                        check=True, capture_output=True)
         print(f"[Git] Push OK — {commit_msg}")
     except subprocess.CalledProcessError as e:
-        # Pas de changement à committer ou autre erreur Git — silencieux
         print(f"[Git] Rien à pusher ou erreur: {e.stderr.decode()[:80] if e.stderr else 'ok'}")
     except Exception as e:
         print(f"[Git] Erreur inattendue: {e}")
@@ -572,11 +574,10 @@ class WatchlistWidget:
                     del pf[ticker]["pending"]
                 save_portfolio(pf)
                 # Auto-push GitHub pour sync avec GitHub Actions
-                push_thread = threading.Thread(
+                threading.Thread(
                     target=git_push_portfolio,
                     args=(f"achat {q}x {ticker} a ${p}",),
-                    daemon=False)
-                push_thread.start()
+                    daemon=True).start()
                 remove_strategy(ticker)
                 if ticker in self.watchlist:
                     del self.watchlist[ticker]
@@ -651,11 +652,10 @@ class WatchlistWidget:
                     pf[ticker]["qty"] = remaining
                 save_portfolio(pf)
                 # Auto-push GitHub pour sync avec GitHub Actions
-                push_thread = threading.Thread(
+                threading.Thread(
                     target=git_push_portfolio,
                     args=(f"vente {q}x {ticker} a ${p}",),
-                    daemon=False)
-                push_thread.start()
+                    daemon=True).start()
                 # Si tous les titres vendus, supprime la strategie
                 if remaining <= 0:
                     remove_strategy(ticker)
