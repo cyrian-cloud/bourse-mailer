@@ -1,0 +1,37 @@
+{
+  "STMPA.PA": {
+    "cost": 23.38,
+    "qty": 3,
+    "currency": "EUR"
+  },
+  "TTE.PA": {
+    "cost": 51.03,
+    "qty": 3,
+    "currency": "EUR"
+  },
+  "2NN.HA": {
+    "cost": 54.68,
+    "qty": 5,
+    "currency": "EUR"
+  },
+  "UST.PA": {
+    "cost": 82.56,
+    "qty": 5,
+    "currency": "EUR"
+  },
+  "NBIS": {
+    "cost": 97.757,
+    "qty": 10,
+    "currency": "USD"
+  },
+  "UBER": {
+    "cost": 70.5,
+    "qty": 2,
+    "currency": "USD"
+  },
+  "GOOGL": {
+    "cost": 354.24,
+    "qty": 1,
+    "currency": "USD"
+  }
+}

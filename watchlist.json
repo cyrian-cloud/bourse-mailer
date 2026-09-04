@@ -1,0 +1,26 @@
+{
+  "UST.PA": {
+    "alert_high": null,
+    "alert_low": null
+  },
+  "TTE.PA": {
+    "alert_high": null,
+    "alert_low": null
+  },
+  "2NN.HA": {
+    "alert_high": null,
+    "alert_low": null
+  },
+  "STMPA.PA": {
+    "alert_high": null,
+    "alert_low": null
+  },
+  "AMZN": {
+    "alert_high": null,
+    "alert_low": null
+  },
+  "NVDA": {
+    "alert_high": null,
+    "alert_low": null
+  }
+}
