@@ -1,7 +1,7 @@
 """
 update_patrimoine.py — Met à jour le Google Sheet "Patrimoine Cyrian" chaque lundi
 - Lit toutes les positions de portfolio.json dynamiquement
-- Ajoute automatiquement les nouvelles actions
+- Calcule correctement cost × qty pour l'investi
 - Calcule les intérêts Bricks le 8 de chaque mois
 """
 
@@ -13,17 +13,12 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # ── CONFIG ────────────────────────────────────────────────────────────────
-SPREADSHEET_ID   = os.environ.get("GSHEET_PATRIMOINE_ID")
-SHEET_NAME       = "Patrimoine"
-PORTFOLIO_FILE   = "portfolio.json"
+SPREADSHEET_ID = os.environ.get("GSHEET_PATRIMOINE_ID")
+SHEET_NAME     = "Patrimoine"
+PORTFOLIO_FILE = "portfolio.json"
 
-# Lignes fixes dans le sheet (ne pas toucher)
-ROW_BOURSE_HEADER = 4   # "BOURSE KEYTRADE"
-ROW_BOURSE_START  = 5   # première ligne d'action
-ROW_BRICKS        = 18  # ligne Bricks (sera recalculée dynamiquement si besoin)
-
-# Tickers USD (conversion EUR/USD nécessaire)
-USD_TICKERS = {"NBIS", "ASTS", "GOOGL", "AMZN", "NVDA", "TSLA", "MSFT", "AAPL", "META", "UBER"}
+# Tickers en USD (conversion EUR/USD nécessaire)
+USD_TICKERS = {"NBIS","ASTS","GOOGL","AMZN","NVDA","TSLA","MSFT","AAPL","META","UBER"}
 
 # Mapping ticker portefeuille → ticker yfinance
 YF_TICKER_MAP = {
@@ -45,23 +40,20 @@ SCOPES = [
 # ── FONCTIONS ─────────────────────────────────────────────────────────────
 
 def load_portfolio():
-    """Charge portfolio.json — retourne {ticker: {qty, cost}}"""
     with open(PORTFOLIO_FILE, "r") as f:
         data = json.load(f)
     positions = {}
     for ticker, info in data.items():
         qty  = info.get("quantity", info.get("qty", 0))
-        cost = info.get("avg_cost", info.get("cost_basis", 0))
+        cost = info.get("avg_cost", info.get("cost_basis", info.get("cost", 0)))
         if qty > 0:
             positions[ticker] = {"qty": qty, "cost": cost}
     return positions
 
 def get_yf_ticker(portfolio_ticker):
-    """Convertit un ticker portefeuille en ticker yfinance"""
     return YF_TICKER_MAP.get(portfolio_ticker, portfolio_ticker)
 
 def get_prices(portfolio_tickers):
-    """Récupère les prix pour tous les tickers"""
     prices = {}
     for pt in portfolio_tickers:
         yf_ticker = get_yf_ticker(pt)
@@ -95,100 +87,97 @@ def connect_gsheet():
     )
     return gspread.authorize(creds)
 
-def get_existing_tickers(ws):
-    """
-    Lit le sheet et retourne un dict {ticker: row_number}
-    pour toutes les actions déjà présentes dans la section bourse
-    """
+def get_sheet_tickers(ws):
+    """Lit le sheet et retourne {ticker_clean: row_number}"""
     existing = {}
-    # On lit jusqu'à la ligne 50 pour être sûr
-    all_values = ws.col_values(1)  # colonne A
-    for i, val in enumerate(all_values):
-        row = i + 1
-        if row < ROW_BOURSE_START:
-            continue
-        if val and val.strip() and not val.isupper():
-            # C'est probablement un ticker (pas un header en majuscules)
-            ticker_clean = val.strip().replace(" (x3)","").replace(" (x5)","").replace(" (x7)","").replace(" (x4)","").replace(" (x2)","").replace(" (x1)","").replace(" (x10)","").replace(" (x8)","").replace(" (x6)","").replace(" (x9)","")
-            existing[ticker_clean] = row
-        if val and val.strip() in ["TOTAL BOURSE", "EPARGNE", "TOTAL EPARGNE PAT", "ALTERNATIFS"]:
-            break  # on s'arrête à la fin de la section bourse
-    return existing
-
-def find_next_bourse_row(ws):
-    """Trouve la première ligne vide dans la section bourse"""
     all_values = ws.col_values(1)
     for i, val in enumerate(all_values):
         row = i + 1
-        if row < ROW_BOURSE_START:
-            continue
-        if val and val.strip() in ["TOTAL BOURSE", "EPARGNE", "TOTAL EPARGNE PAT"]:
-            return row  # insère juste avant le total
-    return ROW_BOURSE_START + 10  # fallback
+        if row < 5: continue
+        if not val or not val.strip(): continue
+        # Arrêt à la section ÉPARGNE
+        if val.strip() in ["ÉPARGNE","EPARGNE","ALTERNATIFS","PATRIMOINE TOTAL",
+                           "TOTAL BOURSE","TOTAL ÉPARGNE","TOTAL ALTERNATIFS","TOTAL GLOBAL"]:
+            break
+        # Nettoie le label pour extraire le ticker
+        clean = val.strip()
+        for suffix in [" (x1)"," (x2)"," (x3)"," (x4)"," (x5)"," (x6)",
+                       " (x7)"," (x8)"," (x9)"," (x10)"," (x11)"," (x12)"]:
+            clean = clean.replace(suffix,"")
+        clean = clean.strip()
+        if clean and clean != "BOURSE KEYTRADE":
+            existing[clean] = row
+    return existing
+
+def find_insert_row(ws):
+    """Trouve la ligne juste avant TOTAL BOURSE ou ÉPARGNE"""
+    all_values = ws.col_values(1)
+    for i, val in enumerate(all_values):
+        row = i + 1
+        if val and val.strip() in ["TOTAL BOURSE","ÉPARGNE","EPARGNE"]:
+            return row
+    return 13  # fallback
 
 def update_bourse(ws, positions, prices, eur_usd):
-    """Met à jour ou ajoute chaque position bourse"""
     updates = []
     total_valeur  = 0
     total_investi = 0
 
-    # Récupère les tickers déjà dans le sheet
-    existing = get_existing_tickers(ws)
-    print(f"  Tickers existants dans le sheet: {list(existing.keys())}")
+    existing = get_sheet_tickers(ws)
+    print(f"  Tickers dans le sheet: {list(existing.keys())}")
 
     for ticker, pos in positions.items():
         qty   = pos["qty"]
-        cost  = pos["cost"]
+        cost  = pos["cost"]   # coût PAR TITRE
         price = prices.get(ticker)
 
         if price is None:
-            print(f"  {ticker:12} — prix non disponible, ignoré")
+            print(f"  {ticker:12} — prix non disponible")
             continue
 
-        is_usd = any(ticker.startswith(t) or ticker == t for t in USD_TICKERS)
+        is_usd = ticker in USD_TICKERS or pos.get("currency","") == "USD"
+
         if is_usd:
             valeur_eur  = round(price * qty / eur_usd, 2)
-            investi_eur = round(cost  * qty / eur_usd, 2)
+            investi_eur = round(cost  * qty / eur_usd, 2)  # cost × qty
         else:
             valeur_eur  = round(price * qty, 2)
-            investi_eur = round(cost  * qty, 2)
+            investi_eur = round(cost  * qty, 2)  # cost × qty
 
         total_valeur  += valeur_eur
         total_investi += investi_eur
         pnl_pct = round((valeur_eur - investi_eur) / investi_eur * 100, 1) if investi_eur else 0
 
-        # Cherche si le ticker existe déjà dans le sheet
+        # Cherche le ticker dans le sheet
         row = None
-        for existing_ticker, existing_row in existing.items():
-            if ticker.upper() in existing_ticker.upper() or existing_ticker.upper() in ticker.upper():
-                row = existing_row
+        for sheet_ticker, sheet_row in existing.items():
+            if ticker.upper() == sheet_ticker.upper():
+                row = sheet_row
                 break
+            # Correspondances spéciales
+            if ticker == "STMPA.PA" and "STMPA" in sheet_ticker.upper(): row = sheet_row; break
+            if ticker == "2NN.HA" and "2NN" in sheet_ticker.upper(): row = sheet_row; break
+            if ticker == "UST.PA" and "UST" in sheet_ticker.upper(): row = sheet_row; break
+
+        label = f"  {ticker} (x{qty})"
 
         if row:
-            # Mise à jour ligne existante
-            label = f"{ticker} (x{qty})"
             updates.append({"range": f"A{row}", "values": [[label]]})
             updates.append({"range": f"B{row}", "values": [[valeur_eur]]})
             updates.append({"range": f"C{row}", "values": [[investi_eur]]})
-            print(f"  MAJ  {ticker:12} x{qty} @ {price:.2f} = {valeur_eur:.2f}€ ({pnl_pct:+.1f}%)")
+            print(f"  MAJ  {ticker:12} x{qty} @ {price:.2f} → {valeur_eur:.2f}€ investi:{investi_eur:.2f}€ ({pnl_pct:+.1f}%)")
         else:
-            # Nouvelle action — trouve la prochaine ligne dispo
-            next_row = find_next_bourse_row(ws)
-            label = f"{ticker} (x{qty})"
-            updates.append({"range": f"A{next_row}", "values": [[label]]})
-            updates.append({"range": f"B{next_row}", "values": [[valeur_eur]]})
-            updates.append({"range": f"C{next_row}", "values": [[investi_eur]]})
-            existing[ticker] = next_row  # met à jour le dict local
-            print(f"  NEW  {ticker:12} x{qty} @ {price:.2f} = {valeur_eur:.2f}€ → ligne {next_row}")
-
-    # Ordres en attente (ligne fixe juste après les actions)
-    next_row = find_next_bourse_row(ws)
-    updates.append({"range": f"B{next_row-1}", "values": [[550]]})
+            # Nouvelle action — insère avant TOTAL BOURSE
+            insert_row = find_insert_row(ws)
+            updates.append({"range": f"A{insert_row}", "values": [[label]]})
+            updates.append({"range": f"B{insert_row}", "values": [[valeur_eur]]})
+            updates.append({"range": f"C{insert_row}", "values": [[investi_eur]]})
+            existing[ticker] = insert_row
+            print(f"  NEW  {ticker:12} x{qty} @ {price:.2f} → {valeur_eur:.2f}€ ligne {insert_row}")
 
     return updates, total_valeur, total_investi
 
 def update_bricks(ws, updates):
-    """Calcule les intérêts Bricks le 8 du mois"""
     today = datetime.date.today()
     if today.day != 8:
         print(f"  Pas le 8 du mois ({today.day}) — Bricks ignoré")
@@ -196,8 +185,8 @@ def update_bricks(ws, updates):
 
     print(f"\n=== CALCUL BRICKS — {today.strftime('%d/%m/%Y')} ===")
 
-    # Trouve la ligne Bricks dynamiquement
-    bricks_row = ROW_BRICKS
+    # Trouve la ligne Bricks
+    bricks_row = 18
     all_values = ws.col_values(1)
     for i, val in enumerate(all_values):
         if val and "Bricks" in str(val):
@@ -206,7 +195,7 @@ def update_bricks(ws, updates):
 
     try:
         val = ws.cell(bricks_row, 2).value
-        capital = float(str(val).replace(",", ".").replace(" ", "")) if val else BRICKS_CAPITAL_INITIAL
+        capital = float(str(val).replace(",", ".").replace(" ", "").replace("€","")) if val else BRICKS_CAPITAL_INITIAL
     except:
         capital = BRICKS_CAPITAL_INITIAL
 
@@ -215,11 +204,7 @@ def update_bricks(ws, updates):
     net    = round(brut - impot, 2)
     capital_apres = round(capital + net, 2)
 
-    print(f"  Capital actuel : {capital:.2f}€")
-    print(f"  Intérêts bruts : {brut:.2f}€  (9%/12)")
-    print(f"  Précompte 30%  : -{impot:.2f}€")
-    print(f"  Intérêts nets  : +{net:.2f}€")
-    print(f"  Capital après  : {capital_apres:.2f}€")
+    print(f"  Capital : {capital:.2f}€ → brut:{brut:.2f}€ impôt:{impot:.2f}€ net:+{net:.2f}€ → {capital_apres:.2f}€")
 
     updates.append({"range": f"B{bricks_row}", "values": [[capital_apres]]})
     updates.append({"range": f"C{bricks_row}", "values": [[BRICKS_CAPITAL_INITIAL]]})
@@ -231,7 +216,6 @@ def main():
     now = datetime.datetime.now()
     print(f"=== Mise à jour Patrimoine — {now.strftime('%d/%m/%Y %H:%M')} ===\n")
 
-    # Connexion
     client = connect_gsheet()
     sh     = client.open_by_key(SPREADSHEET_ID)
     ws     = sh.worksheet(SHEET_NAME)
@@ -241,7 +225,7 @@ def main():
     # ── BOURSE ──
     print("=== BOURSE ===")
     positions  = load_portfolio()
-    print(f"  Positions chargées: {list(positions.keys())}")
+    print(f"  Positions: {list(positions.keys())}")
     prices     = get_prices(list(positions.keys()))
     eur_usd    = get_eur_usd()
     print(f"  EUR/USD: {eur_usd}\n")
@@ -252,7 +236,8 @@ def main():
     pnl = round(total_valeur - total_investi, 2)
     pnl_pct = round(pnl / total_investi * 100, 1) if total_investi else 0
     print(f"\n  Total bourse  : {total_valeur:.2f}€")
-    print(f"  P&L total     : {pnl:+.2f}€ ({pnl_pct:+.1f}%)")
+    print(f"  Total investi : {total_investi:.2f}€")
+    print(f"  P&L           : {pnl:+.2f}€ ({pnl_pct:+.1f}%)")
 
     # ── BRICKS ──
     print("\n=== BRICKS ===")
@@ -261,7 +246,7 @@ def main():
     # ── TIMESTAMP ──
     updates.append({"range": "G1", "values": [[f"Mis à jour: {now.strftime('%d/%m/%Y %H:%M')}"]]})
 
-    # ── ENVOI AU SHEET ──
+    # ── ENVOI ──
     if updates:
         ws.batch_update(updates)
         print(f"\n✅ {len(updates)} cellules mises à jour")
