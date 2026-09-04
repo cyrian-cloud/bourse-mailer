@@ -4,9 +4,10 @@ on:
   push:
     paths:
       - 'portfolio.json'
-  schedule:
+   schedule:
     - cron: '0 7 * * 1'
     - cron: '0 7 8 * *'
+    - cron: '0 7 1 * *'
   workflow_dispatch:
 
 jobs:
