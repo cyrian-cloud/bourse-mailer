@@ -1,7 +1,8 @@
 """
-update_patrimoine.py — Met à jour le Google Sheet "Patrimoine" chaque lundi
-avec les prix actuels des actions depuis yfinance + portfolio.json
-+ calcule les intérêts Bricks le 8 de chaque mois
+update_patrimoine.py — Met à jour le Google Sheet "Patrimoine Cyrian" chaque lundi
+- Lit toutes les positions de portfolio.json dynamiquement
+- Ajoute automatiquement les nouvelles actions
+- Calcule les intérêts Bricks le 8 de chaque mois
 """
 
 import json
@@ -12,26 +13,29 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # ── CONFIG ────────────────────────────────────────────────────────────────
-SPREADSHEET_ID = os.environ.get("GSHEET_PATRIMOINE_ID")
-SHEET_NAME = "Patrimoine"
-PORTFOLIO_FILE = "portfolio.json"
+SPREADSHEET_ID   = os.environ.get("GSHEET_PATRIMOINE_ID")
+SHEET_NAME       = "Patrimoine"
+PORTFOLIO_FILE   = "portfolio.json"
 
-# Bricks config
-BRICKS_CAPITAL_INITIAL = 2248.68   # capital investi
-BRICKS_TAUX_ANNUEL = 0.09          # 9% brut/an
-BRICKS_TAUX_MENSUEL = BRICKS_TAUX_ANNUEL / 12
-BRICKS_FISCALITE = 0.30            # 30% précompte belge
-BRICKS_ROW = 16                    # ligne dans le Google Sheet
+# Lignes fixes dans le sheet (ne pas toucher)
+ROW_BOURSE_HEADER = 4   # "BOURSE KEYTRADE"
+ROW_BOURSE_START  = 5   # première ligne d'action
+ROW_BRICKS        = 18  # ligne Bricks (sera recalculée dynamiquement si besoin)
 
-# Bourse — mapping portfolio.json → yfinance ticker + ligne Google Sheet
-TICKER_CONFIG = {
-    "STMPA.PA": {"yf": "STM.PA",  "row": 6,  "usd": False},
-    "TTE.PA":   {"yf": "TTE.PA",  "row": 7,  "usd": False},
-    "2NN.HA":   {"yf": "NN.AS",   "row": 8,  "usd": False},
-    "UST.PA":   {"yf": "ISTA.PA", "row": 9,  "usd": False},
-    "NBIS":     {"yf": "NBIS",    "row": 10, "usd": True},
-    "ASTS":     {"yf": "ASTS",    "row": 11, "usd": True},
+# Tickers USD (conversion EUR/USD nécessaire)
+USD_TICKERS = {"NBIS", "ASTS", "GOOGL", "AMZN", "NVDA", "TSLA", "MSFT", "AAPL", "META", "UBER"}
+
+# Mapping ticker portefeuille → ticker yfinance
+YF_TICKER_MAP = {
+    "STMPA.PA": "STM.PA",
+    "2NN.HA":   "NN.AS",
+    "UST.PA":   "ISTA.PA",
 }
+
+# Bricks
+BRICKS_CAPITAL_INITIAL = 2248.68
+BRICKS_TAUX_ANNUEL     = 0.09
+BRICKS_FISCALITE       = 0.30
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -41,31 +45,43 @@ SCOPES = [
 # ── FONCTIONS ─────────────────────────────────────────────────────────────
 
 def load_portfolio():
+    """Charge portfolio.json — retourne {ticker: {qty, cost}}"""
     with open(PORTFOLIO_FILE, "r") as f:
         data = json.load(f)
     positions = {}
     for ticker, info in data.items():
         qty  = info.get("quantity", info.get("qty", 0))
         cost = info.get("avg_cost", info.get("cost_basis", 0))
-        positions[ticker] = {"qty": qty, "cost": cost}
+        if qty > 0:
+            positions[ticker] = {"qty": qty, "cost": cost}
     return positions
 
-def get_prices(yf_tickers):
+def get_yf_ticker(portfolio_ticker):
+    """Convertit un ticker portefeuille en ticker yfinance"""
+    return YF_TICKER_MAP.get(portfolio_ticker, portfolio_ticker)
+
+def get_prices(portfolio_tickers):
+    """Récupère les prix pour tous les tickers"""
     prices = {}
-    for ticker in yf_tickers:
+    for pt in portfolio_tickers:
+        yf_ticker = get_yf_ticker(pt)
         try:
-            hist = yf.Ticker(ticker).history(period="2d")
-            prices[ticker] = round(hist["Close"].iloc[-1], 2) if not hist.empty else None
+            hist = yf.Ticker(yf_ticker).history(period="2d")
+            if not hist.empty:
+                prices[pt] = round(float(hist["Close"].iloc[-1]), 2)
+            else:
+                prices[pt] = None
+                print(f"  Pas de données pour {yf_ticker}")
         except Exception as e:
-            print(f"Erreur prix {ticker}: {e}")
-            prices[ticker] = None
+            print(f"  Erreur {yf_ticker}: {e}")
+            prices[pt] = None
     return prices
 
 def get_eur_usd():
     try:
         hist = yf.Ticker("EURUSD=X").history(period="2d")
         if not hist.empty:
-            return round(hist["Close"].iloc[-1], 4)
+            return round(float(hist["Close"].iloc[-1]), 4)
     except:
         pass
     return 1.08
@@ -79,35 +95,58 @@ def connect_gsheet():
     )
     return gspread.authorize(creds)
 
-def calcul_bricks(capital_actuel):
+def get_existing_tickers(ws):
     """
-    Calcule les intérêts Bricks du mois.
-    - 9% brut annuel → 0.75% mensuel
-    - 30% précompte belge déduit
-    - Retourne (brut_mensuel, net_mensuel, capital_apres)
+    Lit le sheet et retourne un dict {ticker: row_number}
+    pour toutes les actions déjà présentes dans la section bourse
     """
-    brut  = round(capital_actuel * BRICKS_TAUX_MENSUEL, 2)
-    impot = round(brut * BRICKS_FISCALITE, 2)
-    net   = round(brut - impot, 2)
-    capital_apres = round(capital_actuel + net, 2)
-    return brut, net, impot, capital_apres
+    existing = {}
+    # On lit jusqu'à la ligne 50 pour être sûr
+    all_values = ws.col_values(1)  # colonne A
+    for i, val in enumerate(all_values):
+        row = i + 1
+        if row < ROW_BOURSE_START:
+            continue
+        if val and val.strip() and not val.isupper():
+            # C'est probablement un ticker (pas un header en majuscules)
+            ticker_clean = val.strip().replace(" (x3)","").replace(" (x5)","").replace(" (x7)","").replace(" (x4)","").replace(" (x2)","").replace(" (x1)","").replace(" (x10)","").replace(" (x8)","").replace(" (x6)","").replace(" (x9)","")
+            existing[ticker_clean] = row
+        if val and val.strip() in ["TOTAL BOURSE", "EPARGNE", "TOTAL EPARGNE PAT", "ALTERNATIFS"]:
+            break  # on s'arrête à la fin de la section bourse
+    return existing
+
+def find_next_bourse_row(ws):
+    """Trouve la première ligne vide dans la section bourse"""
+    all_values = ws.col_values(1)
+    for i, val in enumerate(all_values):
+        row = i + 1
+        if row < ROW_BOURSE_START:
+            continue
+        if val and val.strip() in ["TOTAL BOURSE", "EPARGNE", "TOTAL EPARGNE PAT"]:
+            return row  # insère juste avant le total
+    return ROW_BOURSE_START + 10  # fallback
 
 def update_bourse(ws, positions, prices, eur_usd):
-    """Met à jour les valeurs bourse dans le sheet"""
+    """Met à jour ou ajoute chaque position bourse"""
     updates = []
-    total_valeur = 0
+    total_valeur  = 0
     total_investi = 0
 
-    for portfolio_ticker, cfg in TICKER_CONFIG.items():
-        pos   = positions.get(portfolio_ticker, {})
-        qty   = pos.get("qty", 0)
-        cost  = pos.get("cost", 0)
-        price = prices.get(cfg["yf"])
+    # Récupère les tickers déjà dans le sheet
+    existing = get_existing_tickers(ws)
+    print(f"  Tickers existants dans le sheet: {list(existing.keys())}")
 
-        if price is None or qty == 0:
+    for ticker, pos in positions.items():
+        qty   = pos["qty"]
+        cost  = pos["cost"]
+        price = prices.get(ticker)
+
+        if price is None:
+            print(f"  {ticker:12} — prix non disponible, ignoré")
             continue
 
-        if cfg["usd"]:
+        is_usd = any(ticker.startswith(t) or ticker == t for t in USD_TICKERS)
+        if is_usd:
             valeur_eur  = round(price * qty / eur_usd, 2)
             investi_eur = round(cost  * qty / eur_usd, 2)
         else:
@@ -116,23 +155,40 @@ def update_bourse(ws, positions, prices, eur_usd):
 
         total_valeur  += valeur_eur
         total_investi += investi_eur
-
-        updates.append({"range": f"B{cfg['row']}", "values": [[valeur_eur]]})
-        updates.append({"range": f"C{cfg['row']}", "values": [[investi_eur]]})
         pnl_pct = round((valeur_eur - investi_eur) / investi_eur * 100, 1) if investi_eur else 0
-        print(f"  {portfolio_ticker:12} {qty} × {price:.2f} = {valeur_eur:.2f}€  ({pnl_pct:+.1f}%)")
 
-    # Ordres en attente ligne 12
-    updates.append({"range": "B12", "values": [[550]]})
+        # Cherche si le ticker existe déjà dans le sheet
+        row = None
+        for existing_ticker, existing_row in existing.items():
+            if ticker.upper() in existing_ticker.upper() or existing_ticker.upper() in ticker.upper():
+                row = existing_row
+                break
+
+        if row:
+            # Mise à jour ligne existante
+            label = f"{ticker} (x{qty})"
+            updates.append({"range": f"A{row}", "values": [[label]]})
+            updates.append({"range": f"B{row}", "values": [[valeur_eur]]})
+            updates.append({"range": f"C{row}", "values": [[investi_eur]]})
+            print(f"  MAJ  {ticker:12} x{qty} @ {price:.2f} = {valeur_eur:.2f}€ ({pnl_pct:+.1f}%)")
+        else:
+            # Nouvelle action — trouve la prochaine ligne dispo
+            next_row = find_next_bourse_row(ws)
+            label = f"{ticker} (x{qty})"
+            updates.append({"range": f"A{next_row}", "values": [[label]]})
+            updates.append({"range": f"B{next_row}", "values": [[valeur_eur]]})
+            updates.append({"range": f"C{next_row}", "values": [[investi_eur]]})
+            existing[ticker] = next_row  # met à jour le dict local
+            print(f"  NEW  {ticker:12} x{qty} @ {price:.2f} = {valeur_eur:.2f}€ → ligne {next_row}")
+
+    # Ordres en attente (ligne fixe juste après les actions)
+    next_row = find_next_bourse_row(ws)
+    updates.append({"range": f"B{next_row-1}", "values": [[550]]})
 
     return updates, total_valeur, total_investi
 
 def update_bricks(ws, updates):
-    """
-    Calcule et met à jour Bricks le 8 du mois.
-    Lit le capital actuel depuis le sheet (cellule B16),
-    ajoute les intérêts nets, met à jour B16 et log dans C16.
-    """
+    """Calcule les intérêts Bricks le 8 du mois"""
     today = datetime.date.today()
     if today.day != 8:
         print(f"  Pas le 8 du mois ({today.day}) — Bricks ignoré")
@@ -140,31 +196,39 @@ def update_bricks(ws, updates):
 
     print(f"\n=== CALCUL BRICKS — {today.strftime('%d/%m/%Y')} ===")
 
-    # Lire capital actuel depuis le sheet
+    # Trouve la ligne Bricks dynamiquement
+    bricks_row = ROW_BRICKS
+    all_values = ws.col_values(1)
+    for i, val in enumerate(all_values):
+        if val and "Bricks" in str(val):
+            bricks_row = i + 1
+            break
+
     try:
-        val = ws.cell(BRICKS_ROW, 2).value
-        capital_actuel = float(str(val).replace(",", ".").replace(" ", "")) if val else BRICKS_CAPITAL_INITIAL
+        val = ws.cell(bricks_row, 2).value
+        capital = float(str(val).replace(",", ".").replace(" ", "")) if val else BRICKS_CAPITAL_INITIAL
     except:
-        capital_actuel = BRICKS_CAPITAL_INITIAL
+        capital = BRICKS_CAPITAL_INITIAL
 
-    brut, net, impot, capital_apres = calcul_bricks(capital_actuel)
+    brut   = round(capital * BRICKS_TAUX_ANNUEL / 12, 2)
+    impot  = round(brut * BRICKS_FISCALITE, 2)
+    net    = round(brut - impot, 2)
+    capital_apres = round(capital + net, 2)
 
-    print(f"  Capital actuel : {capital_actuel:.2f}€")
-    print(f"  Intérêts bruts : {brut:.2f}€  ({BRICKS_TAUX_ANNUEL*100:.0f}% / 12)")
+    print(f"  Capital actuel : {capital:.2f}€")
+    print(f"  Intérêts bruts : {brut:.2f}€  (9%/12)")
     print(f"  Précompte 30%  : -{impot:.2f}€")
-    print(f"  Intérêts nets  : {net:.2f}€")
+    print(f"  Intérêts nets  : +{net:.2f}€")
     print(f"  Capital après  : {capital_apres:.2f}€")
 
-    # Mise à jour capital Bricks (B16) et derniers intérêts (C16)
-    updates.append({"range": f"B{BRICKS_ROW}", "values": [[capital_apres]]})
-    updates.append({"range": f"C{BRICKS_ROW}", "values": [[BRICKS_CAPITAL_INITIAL]]})  # investi reste fixe
-    updates.append({"range": f"G{BRICKS_ROW}", "values": [[f"+{net:.2f}€ nets ce mois ({today.strftime('%d/%m/%Y')})"]]})
+    updates.append({"range": f"B{bricks_row}", "values": [[capital_apres]]})
+    updates.append({"range": f"C{bricks_row}", "values": [[BRICKS_CAPITAL_INITIAL]]})
+    updates.append({"range": f"G{bricks_row}", "values": [[f"+{net:.2f}€ nets ({today.strftime('%d/%m/%Y')})"]]})
 
     return updates
 
 def main():
-    now   = datetime.datetime.now()
-    today = datetime.date.today()
+    now = datetime.datetime.now()
     print(f"=== Mise à jour Patrimoine — {now.strftime('%d/%m/%Y %H:%M')} ===\n")
 
     # Connexion
@@ -174,34 +238,33 @@ def main():
 
     updates = []
 
-    # ── 1. BOURSE (chaque lundi) ──────────────────────────────────────────
+    # ── BOURSE ──
     print("=== BOURSE ===")
-    positions = load_portfolio()
-    yf_tickers = [cfg["yf"] for cfg in TICKER_CONFIG.values()]
-    prices  = get_prices(yf_tickers)
-    eur_usd = get_eur_usd()
-    print(f"EUR/USD: {eur_usd}")
+    positions  = load_portfolio()
+    print(f"  Positions chargées: {list(positions.keys())}")
+    prices     = get_prices(list(positions.keys()))
+    eur_usd    = get_eur_usd()
+    print(f"  EUR/USD: {eur_usd}\n")
 
     bourse_updates, total_valeur, total_investi = update_bourse(ws, positions, prices, eur_usd)
     updates.extend(bourse_updates)
 
-    pnl_total = round(total_valeur - total_investi, 2)
-    pnl_pct   = round(pnl_total / total_investi * 100, 1) if total_investi else 0
+    pnl = round(total_valeur - total_investi, 2)
+    pnl_pct = round(pnl / total_investi * 100, 1) if total_investi else 0
     print(f"\n  Total bourse  : {total_valeur:.2f}€")
-    print(f"  Total investi : {total_investi:.2f}€")
-    print(f"  P&L total     : {pnl_total:+.2f}€ ({pnl_pct:+.1f}%)")
+    print(f"  P&L total     : {pnl:+.2f}€ ({pnl_pct:+.1f}%)")
 
-    # ── 2. BRICKS (le 8 du mois seulement) ───────────────────────────────
+    # ── BRICKS ──
     print("\n=== BRICKS ===")
     updates = update_bricks(ws, updates)
 
-    # ── 3. Timestamp mise à jour ──────────────────────────────────────────
+    # ── TIMESTAMP ──
     updates.append({"range": "G1", "values": [[f"Mis à jour: {now.strftime('%d/%m/%Y %H:%M')}"]]})
 
-    # ── 4. Envoi batch au Google Sheet ────────────────────────────────────
+    # ── ENVOI AU SHEET ──
     if updates:
         ws.batch_update(updates)
-        print(f"\n✅ Google Sheet mis à jour ({len(updates)} cellules)")
+        print(f"\n✅ {len(updates)} cellules mises à jour")
 
     print("=== Terminé ===")
 
