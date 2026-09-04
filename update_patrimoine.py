@@ -209,7 +209,24 @@ def update_bricks(ws, updates):
     updates.append({"range": f"G{bricks_row}", "values": [[f"+{net:.2f}€ nets ({today.strftime('%d/%m/%Y')})"]]})
 
     return updates
-
+    
+def update_historique(sh, total_valeur, total_investi):
+    try:
+        ws_hist = sh.worksheet("Historique")
+    except:
+        print("  Onglet Historique non trouvé")
+        return
+    today = datetime.date.today().strftime("%d/%m/%Y")
+    pnl = round(total_valeur - total_investi, 2)
+    pnl_pct = round(pnl / total_investi * 100, 2) if total_investi else 0
+    all_dates = ws_hist.col_values(1)
+    if today in all_dates:
+        row = all_dates.index(today) + 1
+        ws_hist.update(f"A{row}:E{row}", [[today, round(total_valeur,2), round(total_investi,2), pnl, pnl_pct]])
+    else:
+        ws_hist.append_row([today, round(total_valeur,2), round(total_investi,2), pnl, pnl_pct])
+    print(f"  Historique: {today} — {round(total_valeur,2)}€")
+    
 def main():
     now = datetime.datetime.now()
     print(f"=== Mise à jour Patrimoine — {now.strftime('%d/%m/%Y %H:%M')} ===\n")
@@ -236,7 +253,11 @@ def main():
     print(f"\n  Total bourse  : {total_valeur:.2f}€")
     print(f"  Total investi : {total_investi:.2f}€")
     print(f"  P&L           : {pnl:+.2f}€ ({pnl_pct:+.1f}%)")
-
+    
+    # ── HISTORIQUE ──
+    print("\n=== HISTORIQUE ===")
+    update_historique(sh, total_valeur, total_investi)
+    
     # ── BRICKS ──
     print("\n=== BRICKS ===")
     updates = update_bricks(ws, updates)
