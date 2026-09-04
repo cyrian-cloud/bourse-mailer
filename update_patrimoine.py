@@ -175,6 +175,39 @@ def update_bourse(ws, positions, prices, eur_usd):
 
     return updates, total_valeur, total_investi
 
+def update_ing(ws, updates):
+    """Ajoute 30€ à l'investi ING le 1er du mois"""
+    today = datetime.date.today()
+    if today.day != 1:
+        print(f"  Pas le 1er du mois ({today.day}) — ING ignoré")
+        return updates
+
+    print(f"\n=== ING INVEST — {today.strftime('%d/%m/%Y')} ===")
+
+    # Trouve la ligne ING
+    ing_row = None
+    all_values = ws.col_values(1)
+    for i, val in enumerate(all_values):
+        if val and "ING" in str(val):
+            ing_row = i + 1
+            break
+
+    if not ing_row:
+        print("  Ligne ING non trouvée")
+        return updates
+
+    try:
+        val = ws.cell(ing_row, 3).value
+        investi_actuel = float(str(val).replace(",",".").replace(" ","").replace("€","")) if val else 1400
+    except:
+        investi_actuel = 1400
+
+    nouvel_investi = round(investi_actuel + 30, 2)
+    updates.append({"range": f"C{ing_row}", "values": [[nouvel_investi]]})
+    print(f"  ING investi: {investi_actuel:.2f}€ → {nouvel_investi:.2f}€ (+30€)")
+    return updates
+
+
 def update_bricks(ws, updates):
     today = datetime.date.today()
     if today.day != 8:
@@ -257,6 +290,10 @@ def main():
     # ── HISTORIQUE ──
     print("\n=== HISTORIQUE ===")
     update_historique(sh, total_valeur, total_investi)
+    
+    # ── ING ──
+    print("\n=== ING ===")
+    updates = update_ing(ws, updates)
     
     # ── BRICKS ──
     print("\n=== BRICKS ===")
