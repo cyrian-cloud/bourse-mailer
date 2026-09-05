@@ -230,6 +230,16 @@ def update_ing(ws, updates):
 
     return updates
 
+def safe_float(val):
+    """Convertit en float JSON-safe (pas de NaN/inf)"""
+    try:
+        f = float(val)
+        if f != f or abs(f) == float('inf'):
+            return 0.0
+        return round(f, 2)
+    except:
+        return 0.0
+
 def update_historique(sh, total_valeur, total_investi):
     try:
         ws_hist = sh.worksheet("Historique")
@@ -238,27 +248,21 @@ def update_historique(sh, total_valeur, total_investi):
         return
 
     today = datetime.date.today().strftime("%d/%m/%Y")
-    total_valeur  = round(float(total_valeur), 2)
-    total_investi = round(float(total_investi), 2)
-    pnl = round(float(total_valeur - total_investi), 2)
+    tv = safe_float(total_valeur)
+    ti = safe_float(total_investi)
+    pnl = safe_float(tv - ti)
+    pnl_pct = safe_float(pnl / ti * 100) if ti > 0 else 0.0
 
-    if total_investi > 0:
-        pnl_pct = round(float(pnl / total_investi * 100), 2)
-    else:
-        pnl_pct = 0.0
-
-    # Sécurité NaN/inf
-    if pnl_pct != pnl_pct or abs(pnl_pct) == float('inf'):
-        pnl_pct = 0.0
+    row_data = [str(today), tv, ti, pnl, pnl_pct]
 
     all_dates = ws_hist.col_values(1)
     if today in all_dates:
         row = all_dates.index(today) + 1
-        ws_hist.update(f"A{row}:E{row}", [[today, total_valeur, total_investi, pnl, pnl_pct]])
-        print(f"  Historique mis à jour: {today} — {total_valeur}€")
+        ws_hist.update(f"A{row}:E{row}", [row_data])
+        print(f"  Historique mis à jour: {today} — {tv}€")
     else:
-        ws_hist.append_row([today, total_valeur, total_investi, pnl, pnl_pct])
-        print(f"  Historique nouvelle entrée: {today} — {total_valeur}€")
+        ws_hist.append_row(row_data, value_input_option="RAW")
+        print(f"  Historique nouvelle entrée: {today} — {tv}€")
 
 def main():
     now = datetime.datetime.now()
