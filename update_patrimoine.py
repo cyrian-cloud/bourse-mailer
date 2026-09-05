@@ -130,11 +130,21 @@ def update_bourse(ws, positions, prices, eur_usd):
         is_usd = ticker in USD_TICKERS or pos.get("currency","") == "USD"
 
         if is_usd:
-            valeur_eur  = round(float(price * qty / eur_usd), 2)
-            investi_eur = round(float(cost  * qty / eur_usd), 2)
+            valeur_eur  = float(price * qty / eur_usd)
+            investi_eur = float(cost  * qty / eur_usd)
         else:
-            valeur_eur  = round(float(price * qty), 2)
-            investi_eur = round(float(cost  * qty), 2)
+            valeur_eur  = float(price * qty)
+            investi_eur = float(cost  * qty)
+
+        # Vérification NaN/inf
+        if valeur_eur != valeur_eur or abs(valeur_eur) == float('inf'):
+            print(f"  {ticker:12} — valeur NaN ignorée")
+            continue
+        if investi_eur != investi_eur or abs(investi_eur) == float('inf'):
+            investi_eur = 0.0
+
+        valeur_eur  = round(valeur_eur, 2)
+        investi_eur = round(investi_eur, 2)
 
         total_valeur  += valeur_eur
         total_investi += investi_eur
@@ -308,8 +318,19 @@ def main():
 
     # ── ENVOI ──
     if updates:
-        ws.batch_update(updates)
-        print(f"\n✅ {len(updates)} cellules mises à jour")
+        # Filtre les valeurs NaN/inf avant envoi
+        clean_updates = []
+        for u in updates:
+            vals = u.get("values", [[]])[0]
+            clean_vals = []
+            for v in vals:
+                if isinstance(v, float) and (v != v or abs(v) == float('inf')):
+                    clean_vals.append(0.0)
+                else:
+                    clean_vals.append(v)
+            clean_updates.append({"range": u["range"], "values": [clean_vals]})
+        ws.batch_update(clean_updates)
+        print(f"\n✅ {len(clean_updates)} cellules mises à jour")
 
     print("=== Terminé ===")
 
